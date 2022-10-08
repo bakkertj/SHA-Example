@@ -1,14 +1,7 @@
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
-#include <openssl/pem.h>
-#include <openssl/err.h>
-#include <openssl/provider.h>
-#include <openssl/x509v3.h>
-#include <openssl/pkcs12.h>
-#include <openssl/kdf.h>
-#include <openssl/params.h>
-#include <openssl/core_names.h>
-#include <openssl/fips_names.h>
 #include <assert.h>
+#include <string.h>
 
 #define MIN( a,b ) ( ( ( a )<( b ) )?( a ):( b ) )
 #define MAX( a,b ) ( ( ( a )>( b ) )?( a ):( b ) )
@@ -16,104 +9,130 @@
 #define FALSE 0
 
 /* key and initial vector */
-static char key[16] =
-    "\xaa\xbb\x45\xd4\xaa\xbb\x45\xd4"
-    "\xaa\xbb\x45\xd4\xaa\xbb\x45\xd4";
-static char ivec[16] =
-    "\xaa\xbb\x45\xd4\xaa\xbb\x45\xd4"
-    "\xaa\xbb\x45\xd4\xaa\xbb\x45\xd4";
+static char key[17] =
+    "\xaa\xbb\x45\xd4\xaa\xbb\x45\xd4\xaa\xbb\x45\xd4\xaa\xbb\x45\xd4\x0";
+static char ivec[17] =
+    "\xaa\xbb\x45\xd4\xaa\xbb\x45\xd4\xaa\xbb\x45\xd4\xaa\xbb\x45\xd4\x0";
 
-static void
-usage(int exit_code) __attribute__((noreturn));
-
-static void
-usage(int exit_code)
+char *encrypt(const char *data, const char *key, const char *iv, int *length)
 {
-    printf("Usage: %s in out\n", getprogname());
-    exit(exit_code);
+  int key_length, iv_length, data_length;
+  key_length = strlen(key);
+  iv_length = strlen(iv);
+  data_length = strlen(data);
+
+  const EVP_CIPHER *cipher;
+  int cipher_key_length, cipher_iv_length;
+  cipher = EVP_aes_128_cbc();
+  cipher_key_length = EVP_CIPHER_key_length(cipher);
+  cipher_iv_length = EVP_CIPHER_iv_length(cipher);
+
+  if (key_length != cipher_key_length || iv_length != cipher_iv_length) {
+    *length = 0;
+    return NULL;
+  }
+
+  EVP_CIPHER_CTX ctx;
+  int i, cipher_length, final_length;
+  unsigned char *ciphertext;
+
+  EVP_CIPHER_CTX_init(&ctx);
+  EVP_EncryptInit_ex(&ctx, cipher, NULL, (unsigned char *)key, (unsigned char *)iv);
+
+  cipher_length = data_length + EVP_MAX_BLOCK_LENGTH;
+  ciphertext = (unsigned char *)malloc(cipher_length);
+
+  EVP_EncryptUpdate(&ctx, ciphertext, &cipher_length, (unsigned char *)data, data_length);
+  EVP_EncryptFinal_ex(&ctx, ciphertext + cipher_length, &final_length);
+
+  EVP_CIPHER_CTX_cleanup(&ctx);
+
+  *length = cipher_length + final_length;
+  return ciphertext;
+}
+
+char *decrypt(const char *data, int data_length, const char *key, const char *iv)
+{
+  int key_length, iv_length;
+  key_length = strlen(key);
+  iv_length = strlen(iv);
+
+  const EVP_CIPHER *cipher;
+  int cipher_key_length, cipher_iv_length;
+  cipher = EVP_aes_128_cbc();
+  cipher_key_length = EVP_CIPHER_key_length(cipher);
+  cipher_iv_length = EVP_CIPHER_iv_length(cipher);
+
+  if (key_length != cipher_key_length || iv_length != cipher_iv_length) {
+    return NULL;
+  }
+
+  const char *p;
+  char *datax;
+  int i, datax_length;
+
+  datax = (char *)malloc(data_length);
+  memcpy(datax, data, data_length);
+  datax_length = data_length;
+  /*
+  for (p = data, i = 0; *p != '\0'; p += 2, i++) {
+    char buf[3];
+    buf[0] = *p;
+    buf[1] = *(p+1);
+    buf[2] = '\0';
+    datax[i] = strtol(buf, NULL, 16);
+  }
+  datax_length = i;
+  */
+
+  EVP_CIPHER_CTX ctx;
+
+  EVP_CIPHER_CTX_init(&ctx);
+  EVP_DecryptInit_ex(&ctx, cipher, NULL, (unsigned char *)key, (unsigned char *)iv);
+
+  int plain_length, final_length;
+  unsigned char *plaintext;
+
+  plain_length = datax_length;
+  plaintext = (unsigned char *)malloc(plain_length + 1);
+
+  EVP_DecryptUpdate(&ctx, plaintext, &plain_length, (unsigned char *)datax, datax_length);
+  EVP_DecryptFinal_ex(&ctx, plaintext + plain_length, &final_length);
+
+  plaintext[plain_length + final_length] = '\0';
+  //printf("%s\n", plaintext);
+
+  free(datax);
+
+  EVP_CIPHER_CTX_cleanup(&ctx);
+
+  return plaintext;
 }
 
 
-int
-main(int argc, char **argv)
+int main(int argc, const char* argv[])
 {
-    int encryptp = 1;
-    const char *ifn = NULL, *ofn = NULL;
-    FILE *in, *out;
-    void *ibuf, *obuf;
-    int ilen, olen;
-    size_t block_size = 0;
-    const EVP_CIPHER *c = EVP_aes_128_cbc();
-    EVP_CIPHER_CTX *ctx;
-    int ret;
+  if (argc != 2) {
+    fprintf(stderr, "Usage: %s <data>\n", argv[0]);
+    exit(EXIT_FAILURE);
+  }
 
-    setprogname(argv[0]);
+  const char *data;
+  char *encrypted, *decrypted;
+  int enc_length, i;
 
-    if (argc == 2) {
-        if (strcmp(argv[1], "--version") == 0) {
-            printf("version");
-            exit(0);
-        }
-        if (strcmp(argv[1], "--help") == 0)
-            usage(0);
-        usage(1);
-    } else if (argc == 4) {
-        block_size = atoi(argv[1]);
-        if (block_size == 0)
-            printf("Invalid blocksize %s", argv[1]);
-        ifn = argv[2];
-        ofn = argv[3];
-    } else
-        usage(1);
+  data = argv[1];
 
-    in = fopen(ifn, "r");
-    if (in == NULL)
-        printf("Failed to open input file\n");
-    out = fopen(ofn, "w+");
-    if (out == NULL)
-        printf("Failed to open output file\n");
+  encrypted = encrypt(data, key, ivec, &enc_length);
+  for (i = 0; i < enc_length; i++)
+    printf("%02x", (unsigned char)encrypted[i]);
+  printf("\n");
 
-    /* Check that key and ivec are long enough */
-    assert(EVP_CIPHER_key_length(c) <= sizeof(key));
-    assert(EVP_CIPHER_iv_length(c) <= sizeof(ivec));
+  decrypted = decrypt(encrypted, enc_length, key, ivec);
+  printf("%s\n", decrypted);
 
-    /*
-     * Allocate buffer, the output buffer is at least
-     * EVP_CIPHER_block_size() longer
-     */
-    ibuf = malloc(block_size);
-    obuf = malloc(block_size + EVP_CIPHER_block_size(c));
+  free(encrypted);
+  free(decrypted);
 
-    /*
-     * Init the memory used for EVP_CIPHER_CTX and set the key and
-     * ivec.
-     */
-    EVP_CIPHER_CTX_init(ctx);
-    EVP_CipherInit_ex(ctx, c, NULL, key, ivec, encryptp);
-
-    /* read in buffer */
-    while ((ilen = fread(ibuf, 1, block_size, in)) > 0) {
-        /* encrypto/decrypt */
-        ret = EVP_CipherUpdate(ctx, obuf, &olen, ibuf, ilen);
-        if (ret != 1) {
-            EVP_CIPHER_CTX_cleanup(ctx);
-            printf("EVP_CipherUpdate failed\n");
-        }
-        /* write out to output file */
-        fwrite(obuf, 1, olen, out);
-    }
-    /* done reading */
-    fclose(in);
-
-    /* clear up any last bytes left in the output buffer */
-    ret = EVP_CipherFinal_ex(ctx, obuf, &olen);
-    EVP_CIPHER_CTX_cleanup(ctx);
-    if (ret != 1)
-        printf("EVP_CipherFinal_ex failed\n");
-
-    /* write the last bytes out and close */
-    fwrite(obuf, 1, olen, out);
-    fclose(out);
-
-    return 0;
+  return 0;
 }
