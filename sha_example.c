@@ -25,7 +25,39 @@ int main( int argc, char * argv[] )
     }
   }
 
+  /*
+   * Fetch the SHA256 algorithm implementation for doing the digest. We're
+   * using the "default" library context here (first NULL parameter), and
+   * we're not supplying any particular search criteria for our SHA256
+   * implementation (second NULL parameter). Any SHA256 implementation will
+   * do.
+   */
+  sha256 = EVP_MD_fetch(NULL, "SHA256", NULL);
+  if (sha256 == NULL)
+  {
+    /* Clean up all the resources we allocated */
+    OPENSSL_free(outdigest);
+    EVP_MD_free(sha256);
+    EVP_MD_CTX_free(ctx);
+    if (ret != 0)
+    {
+      ERR_print_errors_fp(stderr);
+    }
+  }
 
+  /* Initialise the digest operation */
+  if (!EVP_DigestInit_ex(ctx, sha256, NULL))
+  {
+    /* Clean up all the resources we allocated */
+    OPENSSL_free(outdigest);
+    EVP_MD_free(sha256);
+    EVP_MD_CTX_free(ctx);
+    if (ret != 0)
+    {
+      ERR_print_errors_fp(stderr);
+    }
+  }
 
+  
   return 0;
 }
